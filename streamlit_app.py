@@ -153,8 +153,12 @@ with st.sidebar:
         selected = st.selectbox("Who are you?", ["— Select —"] + names)
         if selected != "— Select —":
             st.session_state.player_name = selected
+    else:
+        st.info("No players have been created yet.")
+
     if st.session_state.player_name:
         st.success(f"Logged in as {st.session_state.player_name}")
+
     st.divider()
     st.caption(f"Current gameweek: **{week}**")
     if st.button("🔄 Refresh schedule"):
@@ -163,6 +167,48 @@ with st.sidebar:
 
 # Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Picks & History", "📅 Upcoming Games", "⚙️ Admin"])
+
+# ---------- TAB 1: Picks & History ----------
+with tab1:
+    st.subheader("Game history")
+    if not players:
+        st.info("Add players in the Admin tab.")
+    else:
+        weeks = sorted({x["week"] for x in picks} | set(range(1, week + 1)))
+        rows = []
+        for p in players:
+            row = {"Player": p["name"]}
+            player_picks = {x["week"]: x for x in picks if x["player_id"] == p["id"]}
+            for w in weeks:
+                pk = player_picks.get(w)
+                if not pk:
+                    row[f"W{w}"] = "—"
+                else:
+                    team = NFL_TEAMS.get(pk["team"], pk["team"])
+                    result = pk.get("result")
+                    icon = "🟢" if result == "win" else "🔴" if result == "loss" else "🟡"
+                    row[f"W{w}"] = f"{icon} {team}"
+            row["Status"] = player_status(p["id"], picks)
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.markdown("**Legend:** 🟢 survived · 🔴 eliminated · 🟡 pending")
+
+        st.subheader("Current standings")
+        standings = []
+        for p in players:
+            pp = [x for x in picks if x["player_id"] == p["id"]]
+            wins = sum(x.get("result") == "win" for x in pp)
+            standings.append({
+                "Player": p["name"],
+                "Status": player_status(p["id"], picks),
+                "Weeks survived": wins,
+                "Current pick": next((NFL_TEAMS.get(x["team"], x["team"]) for x in pp if x["week"] == week), "No pick"),
+            })
+        st.dataframe(
+            pd.DataFrame(standings).sort_values(["Status", "Weeks survived"], ascending=[True, False]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 # ---------- TAB 2: Upcoming + Picks ----------
 with tab2:
@@ -194,8 +240,65 @@ with tab2:
         player_picks = [x for x in picks if x["player_id"] == current_player["id"]]
         used = {x["team"] for x in player_picks}
         opposed = {x["opponent"] for x in player_picks if x["opponent"]}
+
         for g in games:
             for team in (g["home"], g["away"]):
                 if team not in used and team not in opposed:
                     available.append((team, NFL_TEAMS[team]))
-        available = sorted(set(available), key
+
+        available = sorted(set(available), key=lambda x: x[1])
+        if not available:
+            st.warning("No eligible teams available for this week.")
+        else:
+            team_names = {label: code for code, label in available}
+            choice = st.selectbox("Choose your team", list(team_names.keys()))
+            if st.button("Submit pick", type="primary"):
+                team = team_names[choice]
+                ok, opponent = validate_pick(current_player["id"], team, week, picks, games)
+                if not ok:
+                    st.error(opponent)
+                else:
+                    db().table("picks").insert({
+                        "player_id": current_player["id"],
+                        "week": week,
+                        "team": team,
+                        "opponent": opponent,
+                        "result": "pending",
+                    }).execute()
+                    st.success(f"Pick saved: {choice}")
+                    st.rerun()
+
+# ---------- TAB 3: Admin ----------
+with tab3:
+    st.subheader("League administration")
+    st.markdown("### Add a player")
+    with st.form("add_player"):
+        new_name = st.text_input("Player name")
+        add = st.form_submit_button("Add player")
+        if add and new_name.strip():
+            if any(p["name"].lower() == new_name.strip().lower() for p in players):
+                st.error("That player already exists.")
+            else:
+                db().table("players").insert({"name": new_name.strip()}).execute()
+                st.success("Player added.")
+                st.rerun()
+
+    st.markdown("### Gameweek")
+    new_week = st.number_input("Current gameweek", min_value=1, max_value=22, value=week, step=1)
+    if st.button("Save gameweek"):
+        set_gameweek(int(new_week))
+        st.success(f"Current gameweek set to {int(new_week)}.")
+        st.rerun()
+
+    st.markdown("### Existing picks")
+    if picks:
+        admin_df = pd.DataFrame([{
+            "Player": next((p["name"] for p in players if p["id"] == x["player_id"]), x["player_id"]),
+            "Week": x["week"],
+            "Team": NFL_TEAMS.get(x["team"], x["team"]),
+            "Opponent": NFL_TEAMS.get(x["opponent"], x["opponent"]) if x["opponent"] else "Unknown",
+            "Result": x.get("result"),
+        } for x in picks])
+        st.dataframe(admin_df, use_container_width=True, hide_index=True)
+
+st.caption("Schedules are scraped from ESPN's public NFL schedule pages.")
