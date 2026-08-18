@@ -80,18 +80,10 @@ def current_games():
 # ---------- Game logic ----------
 def player_status(player_id, picks):
     p = [x for x in picks if x["player_id"] == player_id]
-    # A player is out at the first completed pick they lost.
     for pick in sorted(p, key=lambda x: x["week"]):
         if pick.get("result") == "loss":
             return "Out"
     return "Active"
-
-def used_teams(player_id, picks):
-    return {x["team"] for x in picks if x["player_id"] == player_id}
-
-def used_opponents(player_id, picks, games):
-    # Opposing team is stored on the pick, so this remains stable after games finish.
-    return {x["opponent"] for x in picks if x["player_id"] == player_id and x["opponent"]}
 
 def validate_pick(player_id, team, week, picks, games):
     player_picks = [x for x in picks if x["player_id"] == player_id]
@@ -104,15 +96,12 @@ def validate_pick(player_id, team, week, picks, games):
     if any(x["opponent"] == team for x in player_picks if x["opponent"]):
         return False, "You have already opposed this team."
 
-    # Find this week's opponent if the game is on the current scoreboard.
     opponent = None
     for g in games:
         if g["home"] == team:
             opponent = g["away"]
         elif g["away"] == team:
             opponent = g["home"]
-    if opponent and (opponent in {x["team"] for x in player_picks} or opponent in {x["opponent"] for x in player_picks if x["opponent"]}):
-        return False, "This pick would violate the 'no team / no opponent more than once' rule."
 
     return True, opponent
 
@@ -129,7 +118,6 @@ def settle_completed_picks(picks, games):
         if not g or not g["completed"]:
             continue
 
-        # Winner includes overtime automatically because ESPN reports final game winner.
         result = "win" if g["winner"] == p["team"] else "loss"
         db().table("picks").update({
             "result": result,
@@ -146,15 +134,24 @@ try:
     week = get_gameweek()
     games_df = current_games()
     games = games_df.to_dict("records")
+
+    # NEW: upcoming games only
+    now = datetime.now(timezone.utc)
+    upcoming_games = [
+        g for g in games
+        if not g["completed"] and datetime.fromisoformat(g["date"].replace("Z", "+00:00")) > now
+    ]
+
     settle_completed_picks(picks, games)
     if any(x.get("result") in (None, "pending") for x in picks):
         picks = get_picks()
+
 except Exception as e:
     st.error("The app could not connect to the database. Check your Supabase secrets and run schema.sql.")
     st.exception(e)
     st.stop()
 
-# Simple private-league login: name selection. For a public app, replace this with Streamlit OIDC.
+# Sidebar
 names = [p["name"] for p in players]
 if "player_name" not in st.session_state:
     st.session_state.player_name = None
@@ -165,8 +162,6 @@ with st.sidebar:
         selected = st.selectbox("Who are you?", ["— Select —"] + names)
         if selected != "— Select —":
             st.session_state.player_name = selected
-    else:
-        st.info("No players have been created yet.")
 
     if st.session_state.player_name:
         st.success(f"Logged in as {st.session_state.player_name}")
@@ -180,55 +175,13 @@ with st.sidebar:
 # Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Picks & History", "🔴 Live This Week", "⚙️ Admin"])
 
-with tab1:
-    st.subheader("Game history")
-    if not players:
-        st.info("Add players in the Admin tab.")
-    else:
-        # One row per player/week, with colour-coded result.
-        weeks = sorted({x["week"] for x in picks} | set(range(1, week + 1)))
-        rows = []
-        for p in players:
-            row = {"Player": p["name"]}
-            player_picks = {x["week"]: x for x in picks if x["player_id"] == p["id"]}
-            for w in weeks:
-                pk = player_picks.get(w)
-                if not pk:
-                    row[f"W{w}"] = "—"
-                else:
-                    team = NFL_TEAMS.get(pk["team"], pk["team"])
-                    result = pk.get("result")
-                    icon = "🟢" if result == "win" else "🔴" if result == "loss" else "🟡"
-                    row[f"W{w}"] = f"{icon} {team}"
-            row["Status"] = player_status(p["id"], picks)
-            rows.append(row)
-
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-        st.markdown("**Legend:** 🟢 survived · 🔴 eliminated · 🟡 pending")
-
-        st.subheader("Current standings")
-        standings = []
-        for p in players:
-            pp = [x for x in picks if x["player_id"] == p["id"]]
-            wins = sum(x.get("result") == "win" for x in pp)
-            standings.append({
-                "Player": p["name"],
-                "Status": player_status(p["id"], picks),
-                "Weeks survived": wins,
-                "Current pick": next((NFL_TEAMS.get(x["team"], x["team"]) for x in pp if x["week"] == week), "No pick"),
-            })
-        st.dataframe(pd.DataFrame(standings).sort_values(["Status", "Weeks survived"], ascending=[True, False]),
-                     use_container_width=True, hide_index=True)
-
+# ---------- TAB 2: Live + Picks ----------
 with tab2:
     st.subheader(f"Live scores — Week {week}")
-    st.caption("Scores refresh from the public ESPN NFL scoreboard. Overtime is treated as part of the final result.")
 
     if games_df.empty:
         st.info("No NFL games are currently on the scoreboard.")
     else:
-        # Add player picks to live games
         week_picks = [x for x in picks if x["week"] == week]
         pick_by_team = {}
         for p in players:
@@ -249,6 +202,7 @@ with tab2:
 
     st.divider()
     st.subheader("Your pick")
+
     current_player = next((p for p in players if p["name"] == st.session_state.player_name), None)
 
     if not current_player:
@@ -264,15 +218,15 @@ with tab2:
         used = {x["team"] for x in player_picks}
         opposed = {x["opponent"] for x in player_picks if x["opponent"]}
 
-        # Only offer teams playing in the current NFL week.
-        for g in games:
+        # NEW: only upcoming games
+        for g in upcoming_games:
             for team in (g["home"], g["away"]):
                 if team not in used and team not in opposed:
                     available.append((team, NFL_TEAMS[team]))
 
         available = sorted(set(available), key=lambda x: x[1])
         if not available:
-            st.warning("No eligible teams are currently available on the scoreboard.")
+            st.warning("No eligible upcoming teams available.")
         else:
             team_names = {label: code for code, label in available}
             choice = st.selectbox("Choose your team", list(team_names.keys()))
@@ -292,9 +246,9 @@ with tab2:
                     st.success(f"Pick saved: {choice}")
                     st.rerun()
 
+# ---------- TAB 3: Admin ----------
 with tab3:
     st.subheader("League administration")
-    st.warning("This tab is intentionally simple for a private league. Add proper admin authentication before making the app public.")
 
     st.markdown("### Add a player")
     with st.form("add_player"):
@@ -326,4 +280,4 @@ with tab3:
         } for x in picks])
         st.dataframe(admin_df, use_container_width=True, hide_index=True)
 
-st.caption("Scores are supplied by ESPN's public scoreboard endpoint. Check the source's terms before deploying commercially.")
+st.caption("Scores are supplied by ESPN's public scoreboard endpoint.")
