@@ -69,11 +69,11 @@ def current_games():
             "away_name": away["team"]["displayName"],
             "home_score": int(home.get("score", 0)),
             "away_score": int(away.get("score", 0)),
-            "state": status["state"],
+            "state": status["state"],          # "pre", "in", "post"
             "status": status["shortDetail"],
             "completed": status["completed"],
             "winner": next((x["team"]["abbreviation"] for x in competitors if x.get("winner")), None),
-            "date": event["date"],
+            "date": event["date"],             # ISO timestamp
         })
     return pd.DataFrame(rows)
 
@@ -135,12 +135,21 @@ try:
     games_df = current_games()
     games = games_df.to_dict("records")
 
-    # NEW: upcoming games only
+    # Robust upcoming-game detection (preseason + regular season)
     now = datetime.now(timezone.utc)
-    upcoming_games = [
-        g for g in games
-        if not g["completed"] and datetime.fromisoformat(g["date"].replace("Z", "+00:00")) > now
-    ]
+
+    def is_upcoming(g):
+        # Trust ESPN's state first
+        if g["state"] in ("pre", "in"):
+            return True
+        # Fallback to kickoff time if possible
+        try:
+            kickoff = datetime.fromisoformat(g["date"].replace("Z", "+00:00"))
+            return kickoff > now and not g["completed"]
+        except Exception:
+            return not g["completed"]
+
+    upcoming_games = [g for g in games if is_upcoming(g)]
 
     settle_completed_picks(picks, games)
     if any(x.get("result") in (None, "pending") for x in picks):
@@ -218,7 +227,7 @@ with tab2:
         used = {x["team"] for x in player_picks}
         opposed = {x["opponent"] for x in player_picks if x["opponent"]}
 
-        # NEW: only upcoming games
+        # Only upcoming / live games
         for g in upcoming_games:
             for team in (g["home"], g["away"]):
                 if team not in used and team not in opposed:
