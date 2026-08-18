@@ -21,10 +21,6 @@ NFL_TEAMS = {
     "TEN":"Tennessee Titans","WSH":"Washington Commanders",
 }
 
-# Adjust these if actual dates differ
-PRESEASON_START = datetime(2026, 8, 8, tzinfo=timezone.utc)   # preseason week 1
-REGULAR_START   = datetime(2026, 9, 10, tzinfo=timezone.utc)  # regular season week 1
-
 # ---------- Database ----------
 @st.cache_resource
 def get_supabase():
@@ -48,20 +44,17 @@ def get_gameweek():
 def set_gameweek(week):
     db().table("settings").update({"value": str(week)}).eq("key", "current_week").execute()
 
-# ---------- ESPN scoreboard with automatic week ranges ----------
+# ---------- Automatic week date ranges ----------
+PRESEASON_START = datetime(2026, 8, 8, tzinfo=timezone.utc)
+REGULAR_START   = datetime(2026, 9, 10, tzinfo=timezone.utc)
+
 def week_date_range(week: int, season_type: int):
-    """
-    season_type: 1 = preseason, 2 = regular
-    Returns (start_date_str, end_date_str) as YYYYMMDD.
-    """
-    if season_type == 1:
-        base = PRESEASON_START
-    else:
-        base = REGULAR_START
+    base = PRESEASON_START if season_type == 1 else REGULAR_START
     start = base + timedelta(weeks=week - 1)
     end = start + timedelta(days=6)
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
+# ---------- ESPN scoreboard (gist logic) ----------
 @st.cache_data(ttl=60)
 def get_nfl_scoreboard(season_type: int, week: int, year: int = 2026):
     start_str, end_str = week_date_range(week, season_type)
@@ -77,12 +70,8 @@ def current_games(season_type: int, week: int):
     data = get_nfl_scoreboard(season_type, week)
     rows = []
     for event in data.get("events", []):
-        # Filter to correct week and season type
-        ev_season = event.get("season", {})
-        ev_week = event.get("week", {})
-        if ev_season.get("type") != season_type:
-            continue
-        if ev_week.get("number") != week:
+        # Only filter by seasonType — NOT week (preseason has no week numbers)
+        if event.get("season", {}).get("type") != season_type:
             continue
 
         comp = event["competitions"][0]
@@ -90,6 +79,7 @@ def current_games(season_type: int, week: int):
         home = next(x for x in competitors if x["homeAway"] == "home")
         away = next(x for x in competitors if x["homeAway"] == "away")
         status = comp["status"]["type"]
+
         rows.append({
             "event_id": event["id"],
             "home": home["team"]["abbreviation"],
@@ -98,7 +88,7 @@ def current_games(season_type: int, week: int):
             "away_name": away["team"]["displayName"],
             "home_score": int(home.get("score", 0)),
             "away_score": int(away.get("score", 0)),
-            "state": status["state"],          # "pre", "in", "post"
+            "state": status["state"],
             "status": status["shortDetail"],
             "completed": status["completed"],
             "winner": next((x["team"]["abbreviation"] for x in competitors if x.get("winner")), None),
@@ -156,7 +146,6 @@ try:
     picks = get_picks()
     week = get_gameweek()
 
-    # Preseason = 1, Regular season = 2
     season_type = 1 if week < 4 else 2
 
     games_df = current_games(season_type, week)
@@ -182,8 +171,6 @@ with st.sidebar:
         selected = st.selectbox("Who are you?", ["— Select —"] + names)
         if selected != "— Select —":
             st.session_state.player_name = selected
-    else:
-        st.info("No players have been created yet.")
 
     if st.session_state.player_name:
         st.success(f"Logged in as {st.session_state.player_name}")
@@ -197,7 +184,7 @@ with st.sidebar:
 # Tabs
 tab1, tab2, tab3 = st.tabs(["📊 Picks & History", "🔴 Live This Week", "⚙️ Admin"])
 
-# ---------- TAB 1: Picks & History ----------
+# ---------- TAB 1 ----------
 with tab1:
     st.subheader("Game history")
     if not players:
@@ -220,31 +207,15 @@ with tab1:
             row["Status"] = player_status(p["id"], picks)
             rows.append(row)
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.markdown("**Legend:** 🟢 survived · 🔴 eliminated · 🟡 pending")
 
-        st.subheader("Current standings")
-        standings = []
-        for p in players:
-            pp = [x for x in picks if x["player_id"] == p["id"]]
-            wins = sum(x.get("result") == "win" for x in pp)
-            standings.append({
-                "Player": p["name"],
-                "Status": player_status(p["id"], picks),
-                "Weeks survived": wins,
-                "Current pick": next((NFL_TEAMS.get(x["team"], x["team"]) for x in pp if x["week"] == week), "No pick"),
-            })
-        st.dataframe(
-            pd.DataFrame(standings).sort_values(["Status", "Weeks survived"], ascending=[True, False]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-# ---------- TAB 2: Live + Picks ----------
+# ---------- TAB 2 ----------
 with tab2:
     st.subheader(f"Live scores — Week {week}")
+
     if games_df.empty:
-        st.info("No NFL games are currently on the scoreboard for this week.")
+        st.info("No NFL games found for this week.")
     else:
+        display = []
         week_picks = [x for x in picks if x["week"] == week]
         pick_by_team = {}
         for p in players:
@@ -252,7 +223,6 @@ with tab2:
                 if pk["player_id"] == p["id"]:
                     pick_by_team.setdefault(pk["team"], []).append(p["name"])
 
-        display = []
         for g in games:
             picked_by = ", ".join(pick_by_team.get(g["home"], []) + pick_by_team.get(g["away"], []))
             display.append({
@@ -261,12 +231,14 @@ with tab2:
                 "Status": g["status"],
                 "LMS Pick": picked_by or "—",
             })
+
         st.dataframe(pd.DataFrame(display), use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Your pick")
 
     current_player = next((p for p in players if p["name"] == st.session_state.player_name), None)
+
     if not current_player:
         st.info("Select your name in the sidebar first.")
     elif player_status(current_player["id"], picks) == "Out":
@@ -276,11 +248,9 @@ with tab2:
         st.success(f"Your Week {week} pick is **{NFL_TEAMS.get(pk['team'], pk['team'])}**.")
     else:
         available = []
-        player_picks = [x for x in picks if x["player_id"] == current_player["id"]]
-        used = {x["team"] for x in player_picks}
-        opposed = {x["opponent"] for x in player_picks if x["opponent"]}
+        used = {x["team"] for x in picks if x["player_id"] == current_player["id"]}
+        opposed = {x["opponent"] for x in picks if x["player_id"] == current_player["id"] and x["opponent"]}
 
-        # Only offer teams in non-completed games for this week
         for g in games:
             if g["completed"]:
                 continue
@@ -289,6 +259,7 @@ with tab2:
                     available.append((team, NFL_TEAMS.get(team, team)))
 
         available = sorted(set(available), key=lambda x: x[1])
+
         if not available:
             st.warning("No eligible teams available for this week.")
         else:
@@ -310,7 +281,7 @@ with tab2:
                     st.success(f"Pick saved: {choice}")
                     st.rerun()
 
-# ---------- TAB 3: Admin ----------
+# ---------- TAB 3 ----------
 with tab3:
     st.subheader("League administration")
 
@@ -344,4 +315,4 @@ with tab3:
         } for x in picks])
         st.dataframe(admin_df, use_container_width=True, hide_index=True)
 
-st.caption("Scores and fixtures are supplied by ESPN's public NFL scoreboard API with week-based date ranges.")
+st.caption("Fixtures supplied by ESPN scoreboard API using automatic week date ranges.")
