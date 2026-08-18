@@ -18,7 +18,7 @@ NFL_TEAMS = {
     "NE":"New England Patriots","NO":"New Orleans Saints","NYG":"New York Giants",
     "NYJ":"New York Jets","PHI":"Philadelphia Eagles","PIT":"Pittsburgh Steelers",
     "SF":"San Francisco 49ers","SEA":"Seattle Seahawks","TB":"Tampa Bay Buccaneers",
-    "TEN":"Tennessee Titans","WAS":"Washington Commanders",
+    "TEN":"Tennessee Titans","WSH":"Washington Commanders",
 }
 
 # ---------- Database ----------
