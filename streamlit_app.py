@@ -135,19 +135,15 @@ try:
     games_df = current_games()
     games = games_df.to_dict("records")
 
-    # Robust upcoming-game detection (preseason + regular season)
+    # STRICT upcoming-game detection: kickoff time must be in the future
     now = datetime.now(timezone.utc)
 
     def is_upcoming(g):
-        # Trust ESPN's state first
-        if g["state"] in ("pre", "in"):
-            return True
-        # Fallback to kickoff time if possible
         try:
             kickoff = datetime.fromisoformat(g["date"].replace("Z", "+00:00"))
             return kickoff > now and not g["completed"]
         except Exception:
-            return not g["completed"]
+            return False
 
     upcoming_games = [g for g in games if is_upcoming(g)]
 
@@ -227,7 +223,7 @@ with tab2:
         used = {x["team"] for x in player_picks}
         opposed = {x["opponent"] for x in player_picks if x["opponent"]}
 
-        # Only upcoming / live games
+        # Only future games
         for g in upcoming_games:
             for team in (g["home"], g["away"]):
                 if team not in used and team not in opposed:
