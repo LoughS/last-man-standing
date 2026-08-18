@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
 import streamlit as st
@@ -20,6 +20,10 @@ NFL_TEAMS = {
     "SF":"San Francisco 49ers","SEA":"Seattle Seahawks","TB":"Tampa Bay Buccaneers",
     "TEN":"Tennessee Titans","WSH":"Washington Commanders",
 }
+
+# Adjust these if actual dates differ
+PRESEASON_START = datetime(2026, 8, 8, tzinfo=timezone.utc)   # preseason week 1
+REGULAR_START   = datetime(2026, 9, 10, tzinfo=timezone.utc)  # regular season week 1
 
 # ---------- Database ----------
 @st.cache_resource
@@ -44,15 +48,26 @@ def get_gameweek():
 def set_gameweek(week):
     db().table("settings").update({"value": str(week)}).eq("key", "current_week").execute()
 
-# ---------- ESPN scoreboard ----------
-@st.cache_data(ttl=30)
+# ---------- ESPN scoreboard with automatic week ranges ----------
+def week_date_range(week: int, season_type: int):
+    """
+    season_type: 1 = preseason, 2 = regular
+    Returns (start_date_str, end_date_str) as YYYYMMDD.
+    """
+    if season_type == 1:
+        base = PRESEASON_START
+    else:
+        base = REGULAR_START
+    start = base + timedelta(weeks=week - 1)
+    end = start + timedelta(days=6)
+    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+
+@st.cache_data(ttl=60)
 def get_nfl_scoreboard(season_type: int, week: int, year: int = 2026):
-    """
-    seasonType: 1 = preseason, 2 = regular, 3 = postseason
-    """
+    start_str, end_str = week_date_range(week, season_type)
     url = (
         "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-        f"?week={week}&year={year}&seasontype={season_type}"
+        f"?dates={start_str}-{end_str}&seasontype={season_type}&year={year}"
     )
     r = requests.get(url, timeout=10)
     r.raise_for_status()
@@ -62,6 +77,14 @@ def current_games(season_type: int, week: int):
     data = get_nfl_scoreboard(season_type, week)
     rows = []
     for event in data.get("events", []):
+        # Filter to correct week and season type
+        ev_season = event.get("season", {})
+        ev_week = event.get("week", {})
+        if ev_season.get("type") != season_type:
+            continue
+        if ev_week.get("number") != week:
+            continue
+
         comp = event["competitions"][0]
         competitors = comp["competitors"]
         home = next(x for x in competitors if x["homeAway"] == "home")
@@ -321,4 +344,4 @@ with tab3:
         } for x in picks])
         st.dataframe(admin_df, use_container_width=True, hide_index=True)
 
-st.caption("Scores and fixtures are supplied by ESPN's public NFL scoreboard API.")
+st.caption("Scores and fixtures are supplied by ESPN's public NFL scoreboard API with week-based date ranges.")
