@@ -34,7 +34,7 @@ TEAMS = {
     "NYJ": "New York Jets", "PHI": "Philadelphia Eagles",
     "PIT": "Pittsburgh Steelers", "SF": "San Francisco 49ers",
     "SEA": "Seattle Seahawks", "TB": "Tampa Bay Buccaneers",
-    "TEN": "Tennessee Titans", "WAS": "Washington Commanders",
+    "TEN": "Tennessee Titans", "WSH": "Washington Commanders",
 }
 
 @st.cache_resource
