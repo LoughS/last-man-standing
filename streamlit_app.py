@@ -44,37 +44,42 @@ def get_gameweek():
 def set_gameweek(week):
     db().table("settings").update({"value": str(week)}).eq("key", "current_week").execute()
 
-# ---------- ESPN schedule scraping ----------
-@st.cache_data(ttl=60)
-def get_nfl_schedule(week: int, season_type: int, year: int = 2026):
-    """Scrape ESPN schedule page for fixtures."""
-    url = f"https://www.espn.co.uk/nfl/schedule/_/week/{week}/year/{year}/seasontype/{season_type}"
+# ---------- ESPN scoreboard ----------
+@st.cache_data(ttl=30)
+def get_nfl_scoreboard(season_type: int, week: int, year: int = 2026):
+    """
+    seasonType: 1 = preseason, 2 = regular, 3 = postseason
+    """
+    url = (
+        "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+        f"?week={week}&year={year}&seasontype={season_type}"
+    )
     r = requests.get(url, timeout=10)
     r.raise_for_status()
-    tables = pd.read_html(r.text)
-    if not tables:
-        return pd.DataFrame()
-    df = tables[0]
-    df.columns = [c if not isinstance(c, tuple) else c[1] for c in df.columns]
-    return df
+    return r.json()
 
-def current_games(week: int, season_type: int):
-    """Convert ESPN schedule table to structured game list."""
-    df = get_nfl_schedule(week, season_type)
+def current_games(season_type: int, week: int):
+    data = get_nfl_scoreboard(season_type, week)
     rows = []
-    for _, row in df.iterrows():
-        if "@" not in row["MATCHUP"]:
-            continue
-        away, home = [x.strip() for x in row["MATCHUP"].split("@")]
+    for event in data.get("events", []):
+        comp = event["competitions"][0]
+        competitors = comp["competitors"]
+        home = next(x for x in competitors if x["homeAway"] == "home")
+        away = next(x for x in competitors if x["homeAway"] == "away")
+        status = comp["status"]["type"]
         rows.append({
-            "home_name": home,
-            "away_name": away,
-            "home": next((k for k, v in NFL_TEAMS.items() if v == home), home[:3].upper()),
-            "away": next((k for k, v in NFL_TEAMS.items() if v == away), away[:3].upper()),
-            "state": "pre",
-            "status": "Scheduled",
-            "completed": False,
-            "date": str(datetime.now(timezone.utc).date()),
+            "event_id": event["id"],
+            "home": home["team"]["abbreviation"],
+            "away": away["team"]["abbreviation"],
+            "home_name": home["team"]["displayName"],
+            "away_name": away["team"]["displayName"],
+            "home_score": int(home.get("score", 0)),
+            "away_score": int(away.get("score", 0)),
+            "state": status["state"],          # "pre", "in", "post"
+            "status": status["shortDetail"],
+            "completed": status["completed"],
+            "winner": next((x["team"]["abbreviation"] for x in competitors if x.get("winner")), None),
+            "date": event["date"],
         })
     return pd.DataFrame(rows)
 
@@ -130,7 +135,8 @@ try:
 
     # Preseason = 1, Regular season = 2
     season_type = 1 if week < 4 else 2
-    games_df = current_games(week, season_type)
+
+    games_df = current_games(season_type, week)
     games = games_df.to_dict("records")
 
     settle_completed_picks(picks, games)
@@ -161,12 +167,12 @@ with st.sidebar:
 
     st.divider()
     st.caption(f"Current gameweek: **{week}**")
-    if st.button("🔄 Refresh schedule"):
+    if st.button("🔄 Refresh scores"):
         st.cache_data.clear()
         st.rerun()
 
 # Tabs
-tab1, tab2, tab3 = st.tabs(["📊 Picks & History", "📅 Upcoming Games", "⚙️ Admin"])
+tab1, tab2, tab3 = st.tabs(["📊 Picks & History", "🔴 Live This Week", "⚙️ Admin"])
 
 # ---------- TAB 1: Picks & History ----------
 with tab1:
@@ -210,17 +216,27 @@ with tab1:
             hide_index=True,
         )
 
-# ---------- TAB 2: Upcoming + Picks ----------
+# ---------- TAB 2: Live + Picks ----------
 with tab2:
-    st.subheader(f"Week {week} schedule")
+    st.subheader(f"Live scores — Week {week}")
     if games_df.empty:
-        st.info("No games found for this week.")
+        st.info("No NFL games are currently on the scoreboard for this week.")
     else:
+        week_picks = [x for x in picks if x["week"] == week]
+        pick_by_team = {}
+        for p in players:
+            for pk in week_picks:
+                if pk["player_id"] == p["id"]:
+                    pick_by_team.setdefault(pk["team"], []).append(p["name"])
+
         display = []
         for g in games:
+            picked_by = ", ".join(pick_by_team.get(g["home"], []) + pick_by_team.get(g["away"], []))
             display.append({
                 "Game": f"{g['away_name']} @ {g['home_name']}",
+                "Score": f"{g['away_score']} - {g['home_score']}",
                 "Status": g["status"],
+                "LMS Pick": picked_by or "—",
             })
         st.dataframe(pd.DataFrame(display), use_container_width=True, hide_index=True)
 
@@ -241,10 +257,13 @@ with tab2:
         used = {x["team"] for x in player_picks}
         opposed = {x["opponent"] for x in player_picks if x["opponent"]}
 
+        # Only offer teams in non-completed games for this week
         for g in games:
+            if g["completed"]:
+                continue
             for team in (g["home"], g["away"]):
                 if team not in used and team not in opposed:
-                    available.append((team, NFL_TEAMS[team]))
+                    available.append((team, NFL_TEAMS.get(team, team)))
 
         available = sorted(set(available), key=lambda x: x[1])
         if not available:
@@ -256,7 +275,7 @@ with tab2:
                 team = team_names[choice]
                 ok, opponent = validate_pick(current_player["id"], team, week, picks, games)
                 if not ok:
-                    st.error(opponent)
+                    st.error(ok)
                 else:
                     db().table("picks").insert({
                         "player_id": current_player["id"],
@@ -271,6 +290,7 @@ with tab2:
 # ---------- TAB 3: Admin ----------
 with tab3:
     st.subheader("League administration")
+
     st.markdown("### Add a player")
     with st.form("add_player"):
         new_name = st.text_input("Player name")
@@ -301,4 +321,4 @@ with tab3:
         } for x in picks])
         st.dataframe(admin_df, use_container_width=True, hide_index=True)
 
-st.caption("Schedules are scraped from ESPN's public NFL schedule pages.")
+st.caption("Scores and fixtures are supplied by ESPN's public NFL scoreboard API.")
